@@ -1,5 +1,9 @@
 import type { TFunction } from 'i18next';
 import { getCredentialScopedQuotaState } from '@/utils/quota/credentialScope';
+import {
+  isAntigravityArgonQuota,
+  resolveAntigravityQuotaScope,
+} from '@/utils/quota/antigravityQuotaScope';
 import type {
   AuthFileItem,
   ClaudeExtraUsage,
@@ -558,6 +562,13 @@ const buildAntigravityQuotaDisplayWindows = (
 ): AccountQuotaDisplayWindow[] => {
   const quota = getCredentialScopedQuotaState(options.stores.antigravityQuota, row.raw);
   const groups = quota?.groups ?? [];
+  // Argon may expose only a weekly bucket. Its presence still separates every
+  // ordinary Gemini window, including 5h. A zero remaining quota also counts.
+  const hasArgonQuota = groups.some((group) =>
+    group.buckets.some((bucket) =>
+      isAntigravityArgonQuota(`${group.id} ${group.label} ${bucket.id} ${bucket.label}`)
+    )
+  );
   return groups.flatMap((group) => {
     const groupLabel = translateAntigravityQuotaLabel(
       group.label,
@@ -598,7 +609,11 @@ const buildAntigravityQuotaDisplayWindows = (
         limitWindowSeconds: parseAntigravityWindowSeconds(bucket.window),
         description,
         groupLabel,
-        modelScope: buildAntigravityWindowModelScope(group.id, group.label, group.models),
+        modelScope: resolveAntigravityQuotaScope(
+          `${group.id} ${group.label} ${bucket.id} ${bucket.label}`,
+          buildAntigravityWindowModelScope(group.id, group.label, group.models),
+          hasArgonQuota
+        ),
         source: 'antigravity',
         observedAtMs: quota?.fetchedAtMs ?? null,
         nowMs: options.nowMs,

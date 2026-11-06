@@ -4443,6 +4443,8 @@ func classifyQuotaModelFamily(modelName string) string {
 	switch {
 	case normalized == "":
 		return "unknown"
+	case strings.Contains(normalized, "argon"):
+		return "gemini_argon"
 	case strings.Contains(normalized, "claude"),
 		strings.Contains(normalized, "gpt"),
 		strings.Contains(normalized, "o1"),
@@ -4466,28 +4468,28 @@ func accountWindowStatMatchesScope(row store.AccountWindowModelStat, scope Accou
 	if codexquota.IsMainScope(scope.Kind, scope.Key) {
 		return codexquota.MatchMainUsage(row.Model, row.BillingModel)
 	}
-	if len(scope.Models) > 0 {
+	isSplitGeminiScope := scope.Kind == "family" && (scope.Key == "gemini_argon" || scope.Key == "gemini_non_argon")
+	if len(scope.Models) > 0 && !isSplitGeminiScope {
 		return codexquota.MatchModelScope(row.Model, row.BillingModel, scope.Models)
 	}
-	rowModels := []string{normalizeQuotaModelName(row.Model), normalizeQuotaModelName(row.BillingModel)}
 	if scope.Kind != "family" {
 		return false, false
 	}
-	if len(rowModels) == 2 && rowModels[1] != "" {
-		rowModels = rowModels[1:]
+	modelName := normalizeQuotaModelName(row.BillingModel)
+	if modelName == "" {
+		modelName = normalizeQuotaModelName(row.Model)
 	}
-	if scope.Kind == "family" {
-		families := map[string]struct{}{}
-		for _, modelName := range rowModels {
-			families[classifyQuotaModelFamily(modelName)] = struct{}{}
-		}
-		if _, ok := families[scope.Key]; ok {
-			return true, false
-		}
-		_, unknown := families["unknown"]
-		return false, unknown
+	family := classifyQuotaModelFamily(modelName)
+	// "gemini" remains inclusive for accounts without an independent Argon
+	// quota. Split accounts request the two disjoint scopes instead.
+	switch scope.Key {
+	case "gemini":
+		return family == "gemini" || family == "gemini_argon", family == "unknown"
+	case "gemini_non_argon":
+		return family == "gemini", family == "unknown"
+	default:
+		return family == scope.Key, family == "unknown"
 	}
-	return false, true
 }
 
 func buildScopedAccountWindowUsageTotals(

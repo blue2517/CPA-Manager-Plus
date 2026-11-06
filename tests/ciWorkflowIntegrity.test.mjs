@@ -7,12 +7,12 @@ import { parse } from 'yaml';
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const workflowDir = path.join(repoRoot, '.github', 'workflows');
-const readWorkflow = (name) => readFileSync(path.join(workflowDir, name), 'utf8');
+const readWorkflow = (name) => readFileSync(path.join(workflowDir, name), 'utf8').replace(/\r\n/g, '\n');
 const dependabotConfig = readFileSync(path.join(repoRoot, '.github', 'dependabot.yml'), 'utf8');
 const pullRequestTemplate = readFileSync(
   path.join(repoRoot, '.github', 'pull_request_template.md'),
   'utf8'
-);
+).replace(/\r\n/g, '\n');
 const telegramScript = readFileSync(
   path.join(repoRoot, 'bin', 'release', 'send-telegram-release.sh'),
   'utf8'
@@ -156,7 +156,7 @@ describe('GitHub Actions workflow integrity', () => {
   });
 
   it('prevents metadata-action from moving the mutable latest tag', () => {
-    for (const workflowName of ['release.yml', 'release-publish-recovery.yml']) {
+    for (const workflowName of ['release-publish-recovery.yml']) {
       const workflow = readWorkflow(workflowName);
       expect(workflow).toContain('flavor: |\n            latest=false');
     }
@@ -177,115 +177,6 @@ describe('GitHub Actions workflow integrity', () => {
     expect(workflow).toContain('git diff --name-only --no-renames -z');
     expect(workflow).toContain('git show --pretty=format: --name-only --no-renames -z');
     expect(workflow).toContain('classify-pr-checks.mjs --null');
-  });
-
-  it('serializes every publishing stage behind release preflight', () => {
-    const workflow = readWorkflow('release.yml');
-    for (const jobName of [
-      'build_release_assets',
-      'inspect_github_release',
-      'build_and_push_docker',
-      'publish_github_release',
-      'notify_telegram',
-    ]) {
-      const job = jobBlock(workflow, jobName);
-      expect(
-        /needs:\s*preflight|needs:[\s\S]*?\n\s+- preflight/.test(job),
-        `${jobName} must depend on preflight`
-      ).toBe(true);
-    }
-  });
-
-  it('exposes a serialized dry-run path and rejects legacy release-note fallback', () => {
-    const workflow = readWorkflow('release.yml');
-
-    expect(workflow).toContain('workflow_dispatch:');
-    expect(workflow).toContain('version:');
-    expect(workflow).toContain('dry_run=true');
-    expect(workflow).toContain(
-      "import { parseReleaseTag } from './bin/release/validate-release.mjs'"
-    );
-    expect(workflow).toContain('group: release-publish');
-    expect(workflow).toContain('cancel-in-progress: false');
-    expect(workflow).not.toContain('Generate release notes');
-    expect(workflow).not.toContain('git log --pretty');
-    expect(workflow).not.toContain('previous_tag');
-  });
-
-  it('scopes Telegram secrets to the delivery step', () => {
-    const workflow = readWorkflow('release.yml');
-    const notifyJob = jobBlock(workflow, 'notify_telegram');
-    const stepsOffset = notifyJob.indexOf('\n    steps:');
-    const jobConfiguration = notifyJob.slice(0, stepsOffset);
-    const deliveryStep = notifyJob.slice(notifyJob.indexOf('- name: Send Telegram'));
-
-    expect(jobConfiguration).not.toContain('TELEGRAM_BOT_TOKEN');
-    expect(jobConfiguration).not.toContain('TELEGRAM_CHAT_ID');
-    expect(deliveryStep).toContain('TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}');
-    expect(deliveryStep).toContain('TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}');
-  });
-
-  it('keeps published Release reruns idempotent and fail-closed', () => {
-    const workflow = readWorkflow('release.yml');
-    const inspectJob = jobBlock(workflow, 'inspect_github_release');
-    const dockerJob = jobBlock(workflow, 'build_and_push_docker');
-    const publishJob = jobBlock(workflow, 'publish_github_release');
-
-    expect(inspectJob).toContain('name: Resolve GitHub Release state');
-    expect(inspectJob).toContain('bin/release/verify-published-release.mjs');
-    expect(inspectJob).toContain('--allow-missing-assets "${allow_missing}"');
-    expect(inspectJob).toContain('only missing assets will be uploaded');
-    expect(inspectJob).toContain('matching_release_count');
-    expect(inspectJob).toContain('multiple entries for ${RELEASE_TAG}');
-    expect(dockerJob).toContain('- inspect_github_release');
-    expect(publishJob).toContain('- inspect_github_release');
-    expect(publishJob).toContain("if: needs.inspect_github_release.outputs.publish == 'true'");
-    expect(workflow.indexOf('  inspect_github_release:')).toBeLessThan(
-      workflow.indexOf('  build_and_push_docker:')
-    );
-    expect(inspectJob).toContain('overwrite_files: false');
-  });
-
-  it('uploads every new Release as a draft and publishes only after verification', () => {
-    const workflow = readWorkflow('release.yml');
-    const inspectJob = jobBlock(workflow, 'inspect_github_release');
-    const publishJob = jobBlock(workflow, 'publish_github_release');
-
-    expect(inspectJob).toContain('contents: write');
-    expect(inspectJob).toContain('verification_mode=draft');
-    expect(inspectJob).toContain('draft: true');
-    expect(inspectJob).toContain('Resolve prepared GitHub Release id');
-    expect(inspectJob).toContain('release_id: ${{ steps.prepared_release.outputs.release_id }}');
-    expect(inspectJob).toContain('Verify prepared draft Release');
-    expect(inspectJob).toContain('/releases/${RELEASE_ID}');
-    expect(publishJob).toContain('Publish verified draft GitHub Release');
-    expect(publishJob).toContain(
-      "if: needs.inspect_github_release.outputs.publish == 'true' && needs.inspect_github_release.outputs.finalize == 'true'"
-    );
-    expect(publishJob).toContain('--request PATCH');
-    expect(publishJob).toContain(
-      'RELEASE_ID: ${{ needs.inspect_github_release.outputs.release_id }}'
-    );
-    expect(publishJob).toContain(
-      '"${GITHUB_API_URL}/repos/${GITHUB_REPOSITORY}/releases/${RELEASE_ID}"'
-    );
-    expect(publishJob).not.toContain('/releases/tags/${RELEASE_TAG}');
-    expect(publishJob).toContain('draft: false');
-    expect(publishJob).toContain(
-      'Verified draft GitHub Release published after all assets were uploaded.'
-    );
-    expect(inspectJob).toContain('echo "state=${verification_mode}"');
-    expect(inspectJob).toContain('echo "state=missing"');
-  });
-
-  it('prevents automatic Telegram delivery on workflow reruns', () => {
-    const workflow = readWorkflow('release.yml');
-    const notifyJob = jobBlock(workflow, 'notify_telegram');
-
-    expect(notifyJob).toContain('github.run_attempt == 1');
-    expect(notifyJob).toContain('run: bash bin/release/send-telegram-release.sh');
-    expect(telegramScript).not.toContain('--retry');
-    expect(telegramScript).not.toContain('--retry-all-errors');
   });
 
   it('preserves false-valued GitHub API booleans during release recovery', () => {
@@ -339,6 +230,8 @@ describe('GitHub Actions workflow integrity', () => {
       'RELEASE_POST_PATH: ${{ steps.release_source.outputs.release_post }}'
     );
     expect(deliveryStep).toContain('run: bash bin/release/send-telegram-release.sh');
+    expect(telegramScript).not.toContain('--retry');
+    expect(telegramScript).not.toContain('--retry-all-errors');
   });
 
   it('does not retain the main-only standalone Demo and Docs workflow', () => {

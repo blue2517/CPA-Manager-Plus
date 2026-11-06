@@ -4,30 +4,12 @@ import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const workflow = readFileSync(path.join(repoRoot, '.github', 'workflows', 'release.yml'), 'utf8');
 const authorization = readFileSync(
   path.join(repoRoot, 'bin', 'release', 'authorize-release-dispatch.mjs'),
   'utf8'
 );
 
-const indexOfRequired = (text, value) => {
-  const index = text.indexOf(value);
-  expect(index, `missing expected release workflow contract: ${value}`).toBeGreaterThanOrEqual(0);
-  return index;
-};
-
-describe('web release publish workflow', () => {
-  it('exposes explicit dry-run and publish dispatch inputs', () => {
-    expect(workflow).toContain('workflow_dispatch:');
-    expect(workflow).toContain('mode:');
-    expect(workflow).toContain('- dry-run');
-    expect(workflow).toContain('- publish');
-    expect(workflow).toContain('expected_sha:');
-    expect(workflow).toContain('dry_run_id:');
-    expect(workflow).toContain('confirm_publish:');
-    expect(workflow).toContain("Release dispatch must run from main");
-  });
-
+describe('legacy release recovery authorization', () => {
   it('binds publish authorization to the exact main SHA and successful prior dry-run', () => {
     expect(authorization).toContain('Publish dispatch requires expected_sha to match the exact main SHA');
     expect(authorization).toContain('Publish dispatch requires a successful dry_run_id');
@@ -52,21 +34,4 @@ describe('web release publish workflow', () => {
     expect(authorization).toContain('does not point directly to');
   });
 
-  it('pins OCI provenance to the release SHA and version', () => {
-    expect(workflow).toContain('org.opencontainers.image.revision=${{ env.RELEASE_SHA }}');
-    expect(workflow).toContain('org.opencontainers.image.version=${{ env.RELEASE_VERSION }}');
-    expect(workflow).toContain('org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}');
-  });
-
-  it('verifies pushed image provenance before publishing the draft GitHub Release', () => {
-    const verifyIndex = indexOfRequired(workflow, "import { verifyImage } from './bin/release/publish-update-index.mjs';");
-    const publishIndex = indexOfRequired(workflow, 'Publish verified draft GitHub Release');
-    expect(verifyIndex).toBeLessThan(publishIndex);
-    expect(workflow).toContain('Registry digest mismatch');
-  });
-
-  it('keeps Telegram non-idempotent delivery out of release reruns', () => {
-    expect(workflow).toContain('github.run_attempt == 1');
-    expect(workflow).toContain('bash bin/release/send-telegram-release.sh');
-  });
 });

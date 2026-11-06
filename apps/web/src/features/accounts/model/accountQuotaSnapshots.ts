@@ -22,6 +22,12 @@ import type {
 } from './accountQuotaDisplayWindows';
 import { remainingPercentFromUsed } from './accountQuotaDisplayWindows';
 import {
+  ANTIGRAVITY_ARGON_SCOPE,
+  ANTIGRAVITY_NON_ARGON_SCOPE,
+  isAntigravityArgonQuota,
+  resolveAntigravityQuotaScope,
+} from '@/utils/quota/antigravityQuotaScope';
+import {
   CODEX_MAIN_QUOTA_SCOPE_KEY,
   canonicalizeCodexProviderWindowIdForScope,
   isCodexKnownScopedProviderWindowId,
@@ -669,6 +675,100 @@ const compareSnapshotFreshness = (
   return leftKey < rightKey ? -1 : 1;
 };
 
+const normalizeAntigravitySnapshotScopes = (
+  definitions: AccountQuotaWindowDefinition[],
+  snapshots: AccountQuotaSnapshotWindow[]
+) => {
+  const isGeminiScope = (scope: QuotaModelScope) =>
+    scope.kind === 'family' &&
+    ['gemini', ANTIGRAVITY_ARGON_SCOPE, ANTIGRAVITY_NON_ARGON_SCOPE].includes(scope.key ?? '');
+  const liveGemini = definitions.filter(
+    (definition) => definition.availability !== 'inactive' && isGeminiScope(definition.modelScope)
+  );
+  const activeGeminiSnapshots = snapshots.filter(
+    (snapshot) =>
+      snapshot.availability !== 'inactive' &&
+      (isGeminiScope(snapshotModelScope(snapshot)) ||
+        isAntigravityArgonQuota(snapshot.provider_window_id))
+  );
+  const liveObservedAtMs = Math.max(0, ...liveGemini.map((item) => item.observedAtMs ?? 0));
+  const snapshotObservedAtMs = Math.max(
+    0,
+    ...activeGeminiSnapshots.map((item) => item.observed_at_ms)
+  );
+  // Empty/loading live data is not evidence that Argon disappeared. Conversely,
+  // an older snapshot must not resurrect Argon after a newer quota inventory.
+  const useLiveInventory = liveGemini.length > 0 && liveObservedAtMs >= snapshotObservedAtMs;
+  const hasArgonQuota =
+    useLiveInventory || activeGeminiSnapshots.length === 0
+      ? liveGemini.some((item) => item.modelScope.key !== 'gemini')
+      : activeGeminiSnapshots.some(
+          (item) =>
+            isAntigravityArgonQuota(item.provider_window_id) ||
+            [ANTIGRAVITY_ARGON_SCOPE, ANTIGRAVITY_NON_ARGON_SCOPE].includes(
+              item.model_scope_key ?? ''
+            )
+        );
+  const normalizedDefinitions = definitions.flatMap((definition) => {
+    if (definition.availability === 'inactive') return [definition];
+    if (
+      !hasArgonQuota &&
+      !useLiveInventory &&
+      activeGeminiSnapshots.length > 0 &&
+      isAntigravityArgonQuota(definition.providerWindowId)
+    ) {
+      return [];
+    }
+    const modelScope = resolveAntigravityQuotaScope(
+      `${definition.providerWindowId} ${definition.display.groupLabel ?? ''}`,
+      definition.modelScope,
+      hasArgonQuota
+    );
+    return [
+      modelScope === definition.modelScope
+        ? definition
+        : { ...definition, modelScope, display: { ...definition.display, modelScope } },
+    ];
+  });
+  const liveById = new Map(normalizedDefinitions.map((item) => [item.providerWindowId, item]));
+  const normalizedSnapshots = snapshots.flatMap((snapshot) => {
+    const scope = snapshotModelScope(snapshot);
+    const isArgon = isAntigravityArgonQuota(snapshot.provider_window_id);
+    const live = liveById.get(snapshot.provider_window_id);
+    if (live && isGeminiScope(live.modelScope) && isGeminiScope(scope)) {
+      if (live.modelScope.key !== scope.key) {
+        // Do not append the old broad scope as a second live window, or graft
+        // its lifecycle/previous-cycle evidence onto a different quota pool.
+        return [];
+      }
+    }
+    if (useLiveInventory && !hasArgonQuota && isArgon && snapshot.availability !== 'inactive') {
+      return [];
+    }
+    if (snapshot.availability === 'inactive' && !isArgon) return [snapshot];
+    const modelScope = resolveAntigravityQuotaScope(
+      snapshot.provider_window_id,
+      scope,
+      hasArgonQuota && snapshot.availability !== 'inactive'
+    );
+    if (modelScope === scope || (modelScope.key === scope.key && modelScope.kind === scope.kind)) {
+      return [snapshot];
+    }
+    return [
+      {
+        ...snapshot,
+        model_scope_kind: modelScope.kind,
+        model_scope_key: modelScope.key,
+        model_ids: modelScope.models,
+        // A snapshot-only legacy Gemini window can be corrected for the current
+        // pool, but the prior cycle may have belonged to a different account tier.
+        previous_cycle: isArgon ? snapshot.previous_cycle : undefined,
+      },
+    ];
+  });
+  return { definitions: normalizedDefinitions, snapshots: normalizedSnapshots };
+};
+
 export const mergeAccountQuotaSnapshotWindows = (
   definitions: AccountQuotaWindowDefinition[],
   snapshots: AccountQuotaSnapshotWindow[],
@@ -677,6 +777,12 @@ export const mergeAccountQuotaSnapshotWindows = (
     getLabel?: (snapshot: AccountQuotaSnapshotWindow) => string;
   } = {}
 ): AccountQuotaWindowDefinition[] => {
+  if (
+    options.provider === 'antigravity' ||
+    definitions.some((item) => item.provider === 'antigravity')
+  ) {
+    ({ definitions, snapshots } = normalizeAntigravitySnapshotScopes(definitions, snapshots));
+  }
   const canonicalProviderWindowId = (
     providerWindowId: string,
     windowKind?: string,

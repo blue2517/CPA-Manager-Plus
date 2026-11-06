@@ -135,6 +135,137 @@ const makeSnapshotRow = (
   }) as unknown as AccountRow;
 
 describe('account quota snapshots', () => {
+  describe('Antigravity quota pools', () => {
+    const ids = [
+      'gemini-models:gemini-5h',
+      'gemini-models:gemini-weekly',
+      'gemini-4-argon:gemini-argon-wtu-weekly',
+    ];
+    const legacySnapshots = () =>
+      ids.map((id) =>
+        makeSnapshot({
+          provider_window_id: id,
+          model_scope_kind: 'family',
+          model_scope_key: 'gemini',
+          current_cycle: makeSnapshotCycle(),
+          previous_cycle: makeSnapshotCycle({ id: 9, state: 'closed', actual_end_ms: 1_000 }),
+        })
+      );
+    const liveDefinitions = (split: boolean) =>
+      ids.slice(0, split ? 3 : 2).map((id, index) =>
+        makeDefinition({
+          key: id,
+          providerWindowId: id,
+          provider: 'antigravity',
+          observedAtMs: 30_000,
+          modelScope: {
+            kind: 'family',
+            key: split ? (index === 2 ? 'gemini_argon' : 'gemini_non_argon') : 'gemini',
+            complete: true,
+          },
+        })
+      );
+
+    it('does not append legacy broad scopes or merge their lifecycle into corrected live windows', () => {
+      const merged = mergeAccountQuotaSnapshotWindows(liveDefinitions(true), legacySnapshots(), {
+        provider: 'antigravity',
+      });
+      expect(merged).toHaveLength(3);
+      for (const window of merged) {
+        expect(window.modelScope.key).toBe(
+          window.providerWindowId.includes('argon') ? 'gemini_argon' : 'gemini_non_argon'
+        );
+        expect(window.currentCycle).toBeUndefined();
+        expect(window.previousCycle).toBeUndefined();
+      }
+    });
+
+    it('repairs legacy snapshot-only scopes while live quota is loading or failed', () => {
+      const merged = mergeAccountQuotaSnapshotWindows([], legacySnapshots(), {
+        provider: 'antigravity',
+      });
+      expect(merged).toHaveLength(3);
+      for (const window of merged) {
+        expect(window.modelScope.key).toBe(
+          window.providerWindowId.includes('argon') ? 'gemini_argon' : 'gemini_non_argon'
+        );
+        expect(window.display.modelScope).toEqual(window.modelScope);
+        if (!window.providerWindowId.includes('argon')) expect(window.previousCycle).toBeNull();
+      }
+    });
+
+    it('keeps all Gemini inclusive without Argon and does not resurrect an older Argon inventory', () => {
+      const merged = mergeAccountQuotaSnapshotWindows(liveDefinitions(false), legacySnapshots(), {
+        provider: 'antigravity',
+      });
+      expect(merged).toHaveLength(2);
+      expect(merged.every((window) => window.modelScope.key === 'gemini')).toBe(true);
+      const snapshotOnly = mergeAccountQuotaSnapshotWindows([], legacySnapshots().slice(0, 2), {
+        provider: 'antigravity',
+      });
+      expect(snapshotOnly.every((window) => window.modelScope.key === 'gemini')).toBe(true);
+    });
+
+    it('does not treat an inactive Argon historical window as a current separate pool', () => {
+      const snapshots = legacySnapshots();
+      snapshots[2].availability = 'inactive';
+      const merged = mergeAccountQuotaSnapshotWindows([], snapshots, { provider: 'antigravity' });
+      expect(
+        merged
+          .filter((window) => !window.providerWindowId.includes('argon'))
+          .every((window) => window.modelScope.key === 'gemini')
+      ).toBe(true);
+      expect(merged.find((window) => window.providerWindowId.includes('argon'))).toMatchObject({
+        availability: 'inactive',
+        modelScope: { key: 'gemini_argon' },
+      });
+    });
+
+    it('uses a newer inclusive snapshot inventory after the account loses its separate Argon quota', () => {
+      const snapshots = legacySnapshots()
+        .slice(0, 2)
+        .map((snapshot) => ({ ...snapshot, observed_at_ms: 40_000 }));
+      const merged = mergeAccountQuotaSnapshotWindows(liveDefinitions(true), snapshots, {
+        provider: 'antigravity',
+      });
+      expect(merged).toHaveLength(2);
+      expect(merged.every((window) => window.modelScope.key === 'gemini')).toBe(true);
+    });
+
+    it('uses a newer split snapshot inventory after the account gains an Argon quota', () => {
+      const snapshots = legacySnapshots().map((snapshot) => ({
+        ...snapshot,
+        observed_at_ms: 40_000,
+      }));
+      const merged = mergeAccountQuotaSnapshotWindows(liveDefinitions(false), snapshots, {
+        provider: 'antigravity',
+      });
+      expect(merged).toHaveLength(3);
+      expect(
+        merged
+          .filter((window) => !window.providerWindowId.includes('argon'))
+          .every((window) => window.modelScope.key === 'gemini_non_argon')
+      ).toBe(true);
+    });
+
+    it('retains lifecycle evidence from already corrected snapshots', () => {
+      const snapshots = legacySnapshots().map((snapshot, index) => ({
+        ...snapshot,
+        observed_at_ms: 40_000,
+        model_scope_key: index === 2 ? 'gemini_argon' : 'gemini_non_argon',
+      }));
+      const merged = mergeAccountQuotaSnapshotWindows(
+        liveDefinitions(true),
+        [...legacySnapshots(), ...snapshots],
+        { provider: 'antigravity' }
+      );
+      expect(merged).toHaveLength(3);
+      expect(
+        merged.every((window) => window.currentCycle?.id === 10 && window.previousCycle?.id === 9)
+      ).toBe(true);
+    });
+  });
+
   it('overlays server provenance, boundaries, scope, and stale state', () => {
     const merged = mergeAccountQuotaSnapshotWindows(
       [makeDefinition()],

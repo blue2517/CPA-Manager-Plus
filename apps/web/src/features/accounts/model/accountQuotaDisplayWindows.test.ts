@@ -1,6 +1,11 @@
 import { describe, expect, it } from 'vitest';
 import type { TFunction } from 'i18next';
-import type { AuthFileItem, CodexQuotaState, CredentialScopedQuotaState } from '@/types';
+import type {
+  AntigravityQuotaGroup,
+  AuthFileItem,
+  CodexQuotaState,
+  CredentialScopedQuotaState,
+} from '@/types';
 import type { MonitoringAccountWindowUsageItem } from '@/services/api';
 import { buildAccountRows, type AccountQuotaStores } from './accountRows';
 import {
@@ -431,6 +436,101 @@ describe('accountQuotaDisplayWindows', () => {
       quotaProgressObservedAtMs: 2_000,
     });
     expect(getAccountQuotaSemanticGroup(windows[1])).toBe('other');
+  });
+
+  it.each([undefined, ['gemini-3-pro', 'gemini-4-argon']])(
+    'separates both Gemini windows from an exhausted Argon weekly pool (models: %j)',
+    (models) => {
+      const gemini: AntigravityQuotaGroup = {
+        id: 'gemini-models',
+        label: 'Gemini Models',
+        models,
+        buckets: [
+          { id: 'gemini-5h', label: '5 Hour Limit', window: '5h', remainingFraction: 0.98 },
+          { id: 'gemini-weekly', label: 'Weekly Limit', window: 'weekly', remainingFraction: 0.98 },
+        ],
+      };
+      const argon: AntigravityQuotaGroup = {
+        id: 'gemini-4-argon',
+        label: 'Gemini 4 Argon',
+        models,
+        buckets: [
+          {
+            id: 'gemini-argon-wtu-weekly',
+            label: 'Weekly Limit',
+            window: 'weekly',
+            remainingFraction: 0,
+          },
+        ],
+      };
+      const stores = emptyStores();
+      stores.antigravityQuota['split.json'] = { status: 'success', groups: [gemini, argon] };
+      stores.antigravityQuota['shared.json'] = {
+        status: 'success',
+        groups: [{ ...gemini, models: undefined }],
+      };
+      const splitRow = buildRow({ name: 'split.json', type: 'antigravity' }, stores);
+      const sharedRow = buildRow({ name: 'shared.json', type: 'antigravity' }, stores);
+      const options = { stores, translateQuotaWindowLabel, t };
+      const splitWindows = buildAccountQuotaDisplayWindows(splitRow, options);
+      expect(splitWindows.map((window) => window.modelScope)).toEqual([
+        { kind: 'family', key: 'gemini_non_argon', complete: true },
+        { kind: 'family', key: 'gemini_non_argon', complete: true },
+        { kind: 'family', key: 'gemini_argon', complete: true },
+      ]);
+      expect(splitWindows.map((window) => window.kind)).toEqual(['five_hour', 'weekly', 'weekly']);
+      expect(splitWindows.map((window) => window.remainingPercent)).toEqual([98, 98, 0]);
+      const sharedWindows = buildAccountQuotaDisplayWindows(sharedRow, options);
+      expect(sharedWindows.map((window) => window.modelScope)).toEqual([
+        { kind: 'family', key: 'gemini', complete: true },
+        { kind: 'family', key: 'gemini', complete: true },
+      ]);
+      expect(
+        accountWindowUsageRequestKey('row', 'gemini-5h', 'current', splitWindows[0].modelScope)
+      ).not.toEqual(
+        accountWindowUsageRequestKey('row', 'gemini-5h', 'current', sharedWindows[0].modelScope)
+      );
+    }
+  );
+
+  it('detects an Argon bucket independently of the group label and ignores empty groups', () => {
+    const stores = emptyStores();
+    stores.antigravityQuota['ag.json'] = {
+      status: 'success',
+      groups: [
+        {
+          id: 'gemini-models',
+          label: 'Gemini Models',
+          buckets: [
+            { id: 'gemini-5h', label: '5 Hour Limit', window: '5h', remainingFraction: 0.9 },
+            {
+              id: 'gemini_argon_wtu_weekly',
+              label: 'Weekly Limit',
+              window: 'weekly',
+              remainingFraction: 0.8,
+            },
+          ],
+        },
+      ],
+    };
+    const options = { stores, translateQuotaWindowLabel, t };
+    const file = { name: 'ag.json', type: 'antigravity' };
+    expect(
+      buildAccountQuotaDisplayWindows(buildRow(file, stores), options).map(
+        (window) => window.modelScope?.key
+      )
+    ).toEqual(['gemini_non_argon', 'gemini_argon']);
+    stores.antigravityQuota[file.name].groups[0].buckets.pop();
+    stores.antigravityQuota[file.name].groups.push({
+      id: 'gemini-4-argon',
+      label: 'Argon',
+      buckets: [],
+    });
+    expect(
+      buildAccountQuotaDisplayWindows(buildRow(file, stores), options).map(
+        (window) => window.modelScope?.key
+      )
+    ).toEqual(['gemini']);
   });
 
   it('flattens Antigravity groups while retaining group and bucket metadata', () => {
