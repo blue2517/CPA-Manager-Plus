@@ -28,25 +28,34 @@ describe('self-use Linux amd64 release workflow', () => {
     expect(steps.indexOf(web)).toBeLessThan(steps.indexOf(step('Build Linux amd64 binary')));
   });
 
-  it('builds only a static linux/amd64 executable with version and commit identity', () => {
-    const build = step('Build Linux amd64 binary');
-    expect(build.env).toEqual({ CGO_ENABLED: '0', GOOS: 'linux', GOARCH: 'amd64' });
-    expect(build.run).toContain('./cmd/cpa-manager-plus');
-    expect(build.run).toContain('buildinfo.Version=${VERSION}');
-    expect(build.run).toContain('buildinfo.SourceCommit=${GITHUB_SHA}');
-    expect(build.run).toContain('-o ../../dist/cpa-manager-plus_linux_amd64');
+  it('builds static linux/amd64 and linux/arm64 executables with version and commit identity', () => {
+    for (const [arch, stepName] of [
+      ['amd64', 'Build Linux amd64 binary'],
+      ['arm64', 'Build Linux arm64 binary'],
+    ]) {
+      const build = step(stepName);
+      expect(build.env).toEqual({ CGO_ENABLED: '0', GOOS: 'linux', GOARCH: arch });
+      expect(build.run).toContain('./cmd/cpa-manager-plus');
+      expect(build.run).toContain('buildinfo.Version=${VERSION}');
+      expect(build.run).toContain('buildinfo.SourceCommit=${GITHUB_SHA}');
+      expect(build.run).toContain(`-o ../../dist/cpa-manager-plus_linux_${arch}`);
+    }
     expect(config.jobs.build).not.toHaveProperty('strategy');
-    expect(step('Verify binary and generate checksum').run).toContain('--version');
-    expect(step('Verify binary and generate checksum').run).toContain('sha256sum');
+    const verify = step('Verify binaries and generate checksums');
+    expect(verify.run).toContain('--version');
+    expect(verify.run).toContain('sha256sum cpa-manager-plus_linux_amd64 cpa-manager-plus_linux_arm64');
   });
 
   it('uploads artifacts for manual builds and publishes tag builds only to the current fork', () => {
-    expect(step('Upload build artifact').with.path).toContain('dist/cpa-manager-plus_linux_amd64');
+    const uploadPath = step('Upload build artifact').with.path;
+    expect(uploadPath).toContain('dist/cpa-manager-plus_linux_amd64');
+    expect(uploadPath).toContain('dist/cpa-manager-plus_linux_arm64');
     const publish = step('Publish tag build to this repository');
     expect(publish.if).toBe("github.ref_type == 'tag'");
     expect(publish.env.GH_REPO).toBe('${{ github.repository }}');
     expect(publish.env.GH_TOKEN).toBe('${{ secrets.GITHUB_TOKEN }}');
     expect(publish.run).toContain('--verify-tag --draft');
+    expect(publish.run).toContain('dist/cpa-manager-plus_linux_arm64');
     expect(publish.run).toContain('--clobber');
     expect(publish.run.indexOf('gh release upload')).toBeLessThan(publish.run.indexOf('gh release edit'));
   });

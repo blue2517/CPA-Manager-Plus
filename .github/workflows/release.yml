@@ -1,4 +1,4 @@
-name: Build Linux amd64
+name: Build Linux amd64 & arm64
 
 on:
   push:
@@ -10,7 +10,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: linux-amd64-${{ github.ref }}
+  group: linux-release-${{ github.ref }}
   cancel-in-progress: false
 
 jobs:
@@ -58,18 +58,32 @@ jobs:
             -ldflags "-s -w -X github.com/seakee/cpa-manager-plus/apps/manager-server/internal/buildinfo.Version=${VERSION} -X github.com/seakee/cpa-manager-plus/apps/manager-server/internal/buildinfo.SourceCommit=${GITHUB_SHA}" \
             -o ../../dist/cpa-manager-plus_linux_amd64 ./cmd/cpa-manager-plus
 
-      - name: Verify binary and generate checksum
+      - name: Build Linux arm64 binary
+        working-directory: apps/manager-server
+        env:
+          CGO_ENABLED: '0'
+          GOOS: linux
+          GOARCH: arm64
+        run: |
+          mkdir -p ../../dist
+          go build -trimpath \
+            -ldflags "-s -w -X github.com/seakee/cpa-manager-plus/apps/manager-server/internal/buildinfo.Version=${VERSION} -X github.com/seakee/cpa-manager-plus/apps/manager-server/internal/buildinfo.SourceCommit=${GITHUB_SHA}" \
+            -o ../../dist/cpa-manager-plus_linux_arm64 ./cmd/cpa-manager-plus
+
+      - name: Verify binaries and generate checksums
         working-directory: dist
         run: |
           ./cpa-manager-plus_linux_amd64 --version
-          sha256sum cpa-manager-plus_linux_amd64 > checksums.txt
+          test -s cpa-manager-plus_linux_arm64
+          sha256sum cpa-manager-plus_linux_amd64 cpa-manager-plus_linux_arm64 > checksums.txt
 
       - name: Upload build artifact
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: cpa-manager-plus_linux_amd64
+          name: cpa-manager-plus_linux
           path: |
             dist/cpa-manager-plus_linux_amd64
+            dist/cpa-manager-plus_linux_arm64
             dist/checksums.txt
           if-no-files-found: error
 
@@ -81,8 +95,8 @@ jobs:
         run: |
           if ! gh release view "${VERSION}" >/dev/null 2>&1; then
             gh release create "${VERSION}" --verify-tag --draft \
-              --title "${VERSION}" --notes "Linux amd64 binary with embedded web UI."
+              --title "${VERSION}" --notes "Linux amd64 and arm64 binaries with embedded web UI."
           fi
           gh release upload "${VERSION}" \
-            dist/cpa-manager-plus_linux_amd64 dist/checksums.txt --clobber
+            dist/cpa-manager-plus_linux_amd64 dist/cpa-manager-plus_linux_arm64 dist/checksums.txt --clobber
           gh release edit "${VERSION}" --draft=false
